@@ -1,42 +1,60 @@
-class RingBuffer {
-  constructor(length) {
-    this.buffer = Array.from(Array(length).keys()).map((i) => ({seq: i}));
-    this.firstSeq = 0;
-    this.lastSeq = length-1;
-  }
-
-  shift() {
-    this.firstSeq++;
-    this.buffer.push({seq: ++this.lastSeq});
-    return this.buffer.shift();
-  }
-
-  set(seq, content) {
-    this.buffer.find(item => item.seq === seq).content = content;
-  }
-
-  get(seq) {
-    return this.buffer.find(item => item.seq === seq).content;
-  }
-
-  slice(start, end) {
-    return this.buffer.slice(start-this.firstSeq, end-this.firstSeq);
-  }
-
-  linear() {
-    return this.buffer.sort((item) => item.seq);
+/**
+ * 나가는 데이터 세그먼트입니다.
+ * 페이로드와 상태를 함께 포함합니다.
+ */
+class OutboundDataSegment {
+  constructor(seq, payload) {
+    this.seq = seq;
+    this.payload = payload;
+    this.sent = false;
+    this.sentAt = null;
+    this.ackReceived = false;
+    this.requestedFor = 0;
   }
 }
 
+/**
+ * 들어오는 데이터 세그먼트입니다.
+ * 페이로드와 상태를 함께 포함합니다.
+ */
+class InboundDataSegment {
+  constructor(seq, payload) {
+    this.seq = seq;
+    this.payload = payload;
+    this.ackSent = false;
+  }
+}
+
+/**
+ * 슬라이딩 윈도우를 가지는 버퍼입니다.
+ */
 class WindowBuffer {
   constructor(windowSize) {
-    this.buffer = new RingBuffer(windowSize * 4);
+    this.buffer = Array(windowSize*4);
+
+    this.bufferStart = 0;
+    this.bufferEnd = this.buffer.length-1;
+
     this.windowStart = 0;
     this.windowEnd = windowSize-1;
   }
 
+  get(index) {
+    return this.buffer[index];
+  }
+
+  set(index, value) {
+    this.buffer[index] = value;
+  }
+
+  shift() {
+    this.buffer.push(undefined);
+    this.bufferEnd++;
+    return this.buffer[this.bufferStart++];
+  }
+
   forwardWindow() {
-    if (this.windowEnd >= this.buffer.lastSeq) {
+    if (this.windowEnd >= this.bufferEnd) {
       throw new Error('Cannot forward window further.');
     }
 
@@ -48,40 +66,49 @@ class WindowBuffer {
     return this.buffer.slice(this.windowStart, this.windowEnd+1);
   }
 
-  fill(contents) {
-    for (let i = 0; i < contents.length; i++) {
-      this.buffer.set(this.buffer.firstSeq+i, contents[i]);
+  async forEachBuffer(fun) {
+    await this.iterate(fun, this.bufferStart, this.bufferEnd);
+  }
+
+  async forEachWindow(fun) {
+    await this.iterate(fun, this.windowStart, this.windowEnd);
+  }
+
+  async iterate(fun, start, end) {
+    for (const [index, item] of this.buffer.slice(start, end+1).entries()) {
+      let result = fun(item, this.bufferStart+index);
+      if (result instanceof Promise) {
+        result = await result;
+      }
+
+      if (result === false) {
+        break;
+      }
     }
   }
 
   collectWindowBehind() {
     const collected = [];
 
-    if (this.buffer.firstSeq >= this.windowStart) {
-      console.warn('nothing to collect from left side of window.');
+    if (this.windowStart === this.bufferStart) {
+      console.warn('sender: nothing to collect from left side of window.');
       return [];
     }
 
-    while (this.buffer.firstSeq < this.windowStart) {
-      collected.push(this.buffer.shift());
+    while (this.bufferStart < this.windowStart) {
+      collected.push(this.shift());
     }
 
     return collected;
   }
 
-  get(seq) {
-    return this.buffer.get(seq);
-  }
-
-  set(seq, content) {
-    this.buffer.set(seq, content);
-  }
-
   toString() {
     let line = '';
-    for (const item of this.buffer.linear()) {
-      line += ` ${item.seq === this.windowStart ? '[' : ''}${item.seq}${item.content?.payload ? '(' + item.content?.payload + ')' : ''}${item.seq === this.windowEnd ? ']' : ''} `;
-    }
+
+    this.forEachBuffer((item, index) => {
+      line += ` ${index === this.windowStart ? '[' : ''}${index}${item?.payload ? '(' + item?.payload + ')' : ''}${index === this.windowEnd ? ']' : ''} `;
+    });
+
     return line;
   }
 }
@@ -91,7 +118,6 @@ const sleep = (m) => new Promise((res, rej) => setTimeout(res, m));
 const payloads = [
   'hello', 'world', 'haha', 'yeah', 'hoho', 'huhu', 'hello', 'world', 'haha', 'yeah', 'hoho', 'huhu', 'hello', 'world', 'haha', 'yeah', 'hoho', 'huhu'
 ];
-
 
 class Transmitter {
   constructor() {
@@ -109,30 +135,25 @@ class Transmitter {
   }
 
   fillBuffer() {
-    for (const holder of this.sendBuffer.getWindow()) {
-      if (holder.content == null && this.payloadsLeft.length > 0) {
-        holder.content = {
-          sent: false,
-          acked: false,
-          requests: 0,
-          payload: this.payloadsLeft.shift()
-        };
+    this.sendBuffer.forEachWindow((item, index) => {
+      if (item == null && this.payloadsLeft.length > 0) {
+        this.sendBuffer.set(index, new OutboundDataSegment(index, this.payloadsLeft.shift()));
       }
-    }
+    });
   }
 
   async onReceive(packet) {
     const {ack} = packet;
 
-    for (const {seq, content} of this.sendBuffer.getWindow()) {
-      if (content) {
-        if (seq < ack) {
-          content.acked = true;
-        } else if (seq === ack) {
-          content.requests++;
+    await this.sendBuffer.forEachWindow((item, index) => {
+      if (item) {
+        if (index < ack) {
+          item.ackReceived = true;
+        } else if (index === ack) {
+          item.requestedFor++;
         }
       }
-    }
+    });
 
     clearTimeout(this.timeoutId);
 
@@ -142,7 +163,10 @@ class Transmitter {
 
     const send = async () => {
       await this.sendWindow();
-      this.timeoutId = setTimeout(() => send(),5000);
+      this.timeoutId = setTimeout(() => {
+        console.log(`sender: timeout resend window!`);
+        send();
+      },5000);
     };
 
     await send();
@@ -151,39 +175,53 @@ class Transmitter {
   async forwardWindowAsPossible() {
     while (true) {
       const window = this.sendBuffer.getWindow();
-      const firstContent = window[0].content;
-      if (firstContent != null && firstContent.acked) {
+      const firstContent = window[0];
+      if (firstContent != null && firstContent.ackReceived) {
         this.sendBuffer.forwardWindow();
         this.sendBuffer.collectWindowBehind();
-        console.log(this.sendBuffer.toString());
+        console.log(`sender: window forwarded ${this.sendBuffer.toString()}`);
       } else {
         break;
       }
     }
   }
 
+
+
   async sendWindow() {
-    for (const {seq, content} of this.sendBuffer.getWindow()) {
-      if (content == null) {
-        return;
+    await this.sendBuffer.forEachWindow(async (item, index) => {
+      if (item == null) {
+        return false;
       }
 
-      const packet = {seq, payload: content.payload}
+      const segment = {
+        seq: index,
+        payload: item.payload
+      };
 
-      if (!content.sent) {
-        await this.send(packet);
-        content.sent = true;
-      } else if (content.sent && !content.acked && content.requests > 1) {
-        await this.send(packet);
-        break;
+      const itemIsNotSentYet = !item.sent;
+      const itemIsSentButNoAckForLongTime = item.sent && !item.ackReceived && (new Date() - item.sentAt) > 5000;
+      const itemIsSentButLost = item.sent && !item.ackReceived && item.requestedFor > 1;
+
+      if (itemIsNotSentYet) {
+        await this.send(segment);
+        item.sent = true;
+        item.sentAt = new Date();
+      } else if (itemIsSentButNoAckForLongTime) {
+        await this.send(segment);
+      } else if (itemIsSentButLost) {
+        await this.send(segment);
+        return false;
       }
-    }
+    });
   }
 
-  async send(packet) {
+  async send(segment) {
+
+    console.log(`sender: send ${segment.seq}`);
 
     if (Math.random() > 0.8) {
-      console.warn('lost data!');
+      console.warn('network: lost data!');
       return;
     }
 
@@ -191,14 +229,14 @@ class Transmitter {
       this.lastSeq = -1;
     }
 
-    if (packet.seq === this.lastSeq+1) {
-      this.lastSeq = packet.seq;
+    if (segment.seq === this.lastSeq+1) {
+      this.lastSeq = segment.seq;
     }
 
-    console.log(packet);
+    console.log(`receiver: got ${segment.seq}. give me ${this.lastSeq+1}.`);
 
     if (Math.random() > 0.8) {
-      console.warn('lost ack!');
+      console.warn('network: lost ack!');
       return;
     }
 
@@ -218,6 +256,7 @@ class Transceiver {
 
 }
 
+//console.log(new WindowBuffer(4).toString());
 
 new Transmitter().startTransmission(payloads);
 

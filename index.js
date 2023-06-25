@@ -91,7 +91,7 @@ class WindowBuffer {
     const collected = [];
 
     if (this.windowStart === this.bufferStart) {
-      console.warn('sender: nothing to collect from left side of window.');
+      console.warn(`nothing to collect from left side of window.`);
       return [];
     }
 
@@ -119,31 +119,86 @@ const payloads = [
   'hello', 'world', 'haha', 'yeah', 'hoho', 'huhu', 'hello', 'world', 'haha', 'yeah', 'hoho', 'huhu', 'hello', 'world', 'haha', 'yeah', 'hoho', 'huhu'
 ];
 
-class Transmitter {
+class Link {
+  constructor(transceiver1, transceiver2) {
+    this.transceiver1 = transceiver1;
+    this.transceiver2 = transceiver2;
+
+    this.init();
+  }
+
+  init() {
+    this.transceiver1.uplink.onRead = (data) => Math.random() > 0.2 ? sleep(500).then(() => this.transceiver2.downlink.push(data)) : 0;
+    this.transceiver2.uplink.onRead = (data) => Math.random() > 0.2 ? sleep(500).then(() => this.transceiver1.downlink.push(data)) : 0;
+  }
+}
+
+class Stream {
   constructor() {
+    this.onRead = () => {};
+  }
+
+  push(data) {
+    this.onRead(data);
+  }
+}
+
+class Transceiver {
+  constructor(name) {
+    this.name = name;
+
     this.windowSize = 4;
+
     this.sendBuffer = new WindowBuffer(this.windowSize);
-    this.payloadsLeft = [];
+    this.outbounds = [];
     this.timeoutId = 0;
+
+    this.recvBuffer = new WindowBuffer(this.windowSize);
+
+    this.downlink = new Stream();
+    this.uplink = new Stream();
+
+    this.init();
+
+    this.resolve = () => {};
+  }
+
+  init() {
+    this.downlink.onRead = (data) => this.onReceive(data);
   }
 
   async startTransmission(payloads) {
-    this.payloadsLeft = payloads;
+    this.outbounds = payloads;
     this.fillBuffer();
 
     await this.sendWindow();
+
+    return new Promise((res) => this.resolve = res);
   }
 
   fillBuffer() {
     this.sendBuffer.forEachWindow((item, index) => {
-      if (item == null && this.payloadsLeft.length > 0) {
-        this.sendBuffer.set(index, new OutboundDataSegment(index, this.payloadsLeft.shift()));
+      if (item == null && this.outbounds.length > 0) {
+        this.sendBuffer.set(index, new OutboundDataSegment(index, this.outbounds.shift()));
+        console.log(`${this.name}: fill buffer at seq ${index}.`);
       }
     });
   }
 
-  async onReceive(packet) {
-    const {ack} = packet;
+  async onReceive(segment) {
+    const {ack} = segment;
+
+    if (Number.isInteger(ack)) {
+      await this.handleAckSegment(segment);
+    } else {
+      await this.handleDataSegment(segment);
+    }
+  }
+
+  async handleAckSegment(segment) {
+    const {ack} = segment;
+
+    console.log(`${this.name}: got ack ${ack}`);
 
     await this.sendBuffer.forEachWindow((item, index) => {
       if (item) {
@@ -157,14 +212,21 @@ class Transmitter {
 
     clearTimeout(this.timeoutId);
 
-    await this.forwardWindowAsPossible();
+    await this.forwardSendWindowAsPossible();
+
+    if (this.outbounds.length === 0 && this.sendBuffer.get(this.sendBuffer.windowStart) == null) {
+      console.log(`${this.name}: all sent! finish transmission.`);
+      this.resolve();
+      return;
+    }
+
     this.fillBuffer();
     await this.sendWindow();
 
     const send = async () => {
       await this.sendWindow();
       this.timeoutId = setTimeout(() => {
-        console.log(`sender: timeout resend window!`);
+        console.log(`${this.name}: timeout resend window`);
         send();
       },5000);
     };
@@ -172,21 +234,39 @@ class Transmitter {
     await send();
   }
 
-  async forwardWindowAsPossible() {
+  async handleDataSegment(segment) {
+    const {seq, payload} = segment;
+
+    if (seq < this.recvBuffer.windowStart) {
+      console.log(`${this.name}: got seq ${seq} again. maybe my ack has dropped. resend ack.`);
+      await this.send({ack: seq+1/*TODO send accumulative ack*/});
+      return;
+    }
+
+    await this.recvBuffer.forEachWindow((item, index) => {
+      if (index === seq) {
+        this.recvBuffer.set(index, new InboundDataSegment(index, payload));
+        console.log(`${this.name}: got seq ${seq}. saved in window.`);
+      }
+    });
+
+    await this.ackWindow();
+    await this.forwardRecvWindowAsPossible();
+  }
+
+  async forwardSendWindowAsPossible() {
     while (true) {
       const window = this.sendBuffer.getWindow();
       const firstContent = window[0];
       if (firstContent != null && firstContent.ackReceived) {
         this.sendBuffer.forwardWindow();
         this.sendBuffer.collectWindowBehind();
-        console.log(`sender: window forwarded ${this.sendBuffer.toString()}`);
+        console.log(`${this.name}: window forwarded. now looks like: ${this.sendBuffer.toString()}`);
       } else {
         break;
       }
     }
   }
-
-
 
   async sendWindow() {
     await this.sendBuffer.forEachWindow(async (item, index) => {
@@ -204,66 +284,75 @@ class Transmitter {
       const itemIsSentButLost = item.sent && !item.ackReceived && item.requestedFor > 1;
 
       if (itemIsNotSentYet) {
+        console.log(`${this.name}: initial send ${index}`);
+
         await this.send(segment);
         item.sent = true;
         item.sentAt = new Date();
       } else if (itemIsSentButNoAckForLongTime) {
+        console.log(`${this.name}: timeout send ${index}`);
+
         await this.send(segment);
       } else if (itemIsSentButLost) {
+        console.log(`${this.name}: lost(dup ack) resend ${index}`);
+
         await this.send(segment);
         return false;
       }
     });
   }
 
+  async forwardRecvWindowAsPossible() {
+    while (true) {
+      const window = this.recvBuffer.getWindow();
+      const firstContent = window[0];
+      if (firstContent != null && firstContent.ackSent) {
+        this.recvBuffer.forwardWindow();
+        const received = this.recvBuffer.collectWindowBehind();
+
+        console.log(`${this.name}: window forwarded. now looks like: ${this.recvBuffer.toString()}`);
+        console.log(`${this.name}: received ${JSON.stringify(received)}`);
+      } else {
+        break;
+      }
+    }
+
+  }
+
+  async ackWindow() {
+    let largestContinuousSeq = this.recvBuffer.windowStart-1;
+
+    await this.recvBuffer.forEachWindow(async (item, index) => {
+      if (item == null) {
+        return;
+      }
+
+      if (index === largestContinuousSeq+1) {
+        largestContinuousSeq = index;
+      } else {
+        console.log(`${this.name}: have ${index} on window but last accumulative seq ends at ${largestContinuousSeq}, so ack will be ${largestContinuousSeq+1}.`);
+      }
+
+      const segment = {ack: largestContinuousSeq+1};
+
+      const ackNotSentYet = !item.ackSent;
+
+      if (ackNotSentYet) {
+        console.log(`${this.name}: sending ack ${segment.ack}`);
+        await this.send(segment);
+        item.ackSent = true;
+      }
+    })
+  }
+
   async send(segment) {
-
-    console.log(`sender: send ${segment.seq}`);
-
-    if (Math.random() > 0.8) {
-      console.warn('network: lost data!');
-      return;
-    }
-
-    if (this.lastSeq == null) {
-      this.lastSeq = -1;
-    }
-
-    if (segment.seq === this.lastSeq+1) {
-      this.lastSeq = segment.seq;
-    }
-
-    console.log(`receiver: got ${segment.seq}. give me ${this.lastSeq+1}.`);
-
-    if (Math.random() > 0.8) {
-      console.warn('network: lost ack!');
-      return;
-    }
-
-    sleep(500).then(() => this.onReceive({ack: this.lastSeq+1}))
-
-
-
+    this.uplink.push(segment);
   }
 }
 
-class Transceiver {
-  constructor() {
-    this.sendBuffer
-  }
+const alpha = new Transceiver('Alpha');
+const bravo = new Transceiver('Bravo');
 
+new Link(alpha, bravo);
 
-
-}
-
-//console.log(new WindowBuffer(4).toString());
-
-new Transmitter().startTransmission(payloads);
-
-
-
-
-
-
-console.log('hi')
-
+alpha.startTransmission(payloads).then(() => bravo.startTransmission(['hi', 'haha']));

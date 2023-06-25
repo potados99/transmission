@@ -1,3 +1,17 @@
+function concatenate(resultConstructor, ...arrays) {
+  let totalLength = 0;
+  for (const arr of arrays) {
+    totalLength += arr.length;
+  }
+  const result = new resultConstructor(totalLength);
+  let offset = 0;
+  for (const arr of arrays) {
+    result.set(arr, offset);
+    offset += arr.length;
+  }
+  return result;
+}
+
 /**
  * 나가는 데이터 세그먼트입니다.
  * 페이로드와 상태를 함께 포함합니다.
@@ -252,10 +266,31 @@ class Transceiver {
   }
 
   _sendToUplink(segment) {
-    this.uplink.push(segment);
+    const {ack, seq, payload} = segment;
+
+    const isAck = Number.isInteger(ack);
+
+    const header = concatenate(
+      Uint8Array,
+      Uint8Array.of(ack ? 1 : 0), // 8bit flags
+      new Uint8Array(Uint32Array.of(isAck ? ack : seq).buffer) // 32bit ack or seq
+    );
+
+    this.uplink.push(isAck ? header : concatenate(Uint8Array, header, payload));
   }
 
-  _onReceiveFromDownlink(segment) {
+  _onReceiveFromDownlink(serialized) {
+    const header = serialized.slice(0, 5);
+    const isAck = !!(header[0] & 1);
+    const ackOrSeq = new DataView(header.slice(1, 5).buffer).getUint32(0, true);
+    const payload = serialized.slice(5);
+
+    const segment = {
+      ack: isAck ? ackOrSeq : undefined,
+      seq: isAck ? undefined : ackOrSeq,
+      payload: payload
+    };
+
     const {ack} = segment;
 
     if (Number.isInteger(ack)) {
@@ -364,12 +399,12 @@ class Transceiver {
         this._recvBuffer.forwardWindow();
         const received = this._recvBuffer.collectWindowBehind();
 
-        for (const {payload} of received) {
+        for (const {seq, payload} of received) {
           this._payloadReceiveCallback(payload);
+          this._log(`consumed ${seq}.`);
         }
 
         this._log(`window forwarded. now looks like: ${this._recvBuffer.toString()}`);
-        this._log(`received ${JSON.stringify(received)}`);
       } else {
         break;
       }
@@ -408,16 +443,16 @@ class Socket {
   new Link(alpha.transceiver, bravo.transceiver);
 
   alpha.listen((payload) => {
-    console.log(`==== alpha got [${payload}] ====`);
+    console.log(`==== alpha got [${new TextDecoder().decode(payload)}] ====`);
   });
 
   bravo.listen((payload) => {
-    console.log(`==== bravo got [${payload}] ====`);
+    console.log(`==== bravo got [${new TextDecoder().decode(payload)}] ====`);
   });
 
   await Promise.all([
-    alpha.send("hello", "world"),
-    bravo.send("haha", "hoho")
+    alpha.send(...["hello", "world"].map(t => new TextEncoder().encode(t))),
+    bravo.send(...["haha", "hoho"].map(t => new TextEncoder().encode(t)))
   ]);
 
   console.log('done!');

@@ -2,9 +2,9 @@
   "name": "transmission",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "socket.js",
   "scripts": {
-    "start": "node index.js",
+    "start": "node socket.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

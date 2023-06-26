@@ -266,31 +266,30 @@ class Transceiver {
   }
 
   _sendToUplink(segment) {
+    const buffer = this._serializeSegment(segment);
+
+    this.uplink.push(buffer);
+  }
+
+  _serializeSegment(segment) {
     const {ack, seq, payload} = segment;
 
     const isAck = Number.isInteger(ack);
+    const ackOrSeq = isAck ? ack : seq;
 
-    const header = concatenate(
-      Uint8Array,
-      Uint8Array.of(ack ? 1 : 0), // 8bit flags
-      new Uint8Array(Uint32Array.of(isAck ? ack : seq).buffer) // 32bit ack or seq
+    const header = Uint8Array.of(
+        ack ? 1 : 0,
+        (ackOrSeq & 0xFF000000) >> 24,
+        (ackOrSeq & 0x00FF0000) >> 16,
+        (ackOrSeq & 0x0000FF00) >> 8,
+        (ackOrSeq & 0x000000FF) >> 0,
     );
 
-    this.uplink.push(isAck ? header : concatenate(Uint8Array, header, payload));
+    return isAck ? header : this._concatenate(Uint8Array, header, payload);
   }
 
-  _onReceiveFromDownlink(serialized) {
-    const header = serialized.slice(0, 5);
-    const isAck = !!(header[0] & 1);
-    const ackOrSeq = new DataView(header.slice(1, 5).buffer).getUint32(0, true);
-    const payload = serialized.slice(5);
-
-    const segment = {
-      ack: isAck ? ackOrSeq : undefined,
-      seq: isAck ? undefined : ackOrSeq,
-      payload: payload
-    };
-
+  _onReceiveFromDownlink(buffer) {
+    const segment = this._parseSegment(buffer);
     const {ack} = segment;
 
     if (Number.isInteger(ack)) {
@@ -298,6 +297,20 @@ class Transceiver {
     } else {
       this._handleDataSegment(segment);
     }
+  }
+
+  _parseSegment(buffer) {
+    const header = buffer.slice(0, 5);
+
+    const isAck = !!(header[0] & 1);
+    const ackOrSeq = new DataView(header.slice(1, 5).buffer).getUint32(0);
+    const payload = buffer.slice(5);
+
+    return {
+      ack: isAck ? ackOrSeq : undefined,
+      seq: isAck ? undefined : ackOrSeq,
+      payload: isAck ? undefined : payload
+    };
   }
 
   _handleAckSegment(segment) {
@@ -410,6 +423,20 @@ class Transceiver {
       }
     }
 
+  }
+
+  _concatenate(resultConstructor, ...arrays) {
+    let totalLength = 0;
+    for (const arr of arrays) {
+      totalLength += arr.length;
+    }
+    const result = new resultConstructor(totalLength);
+    let offset = 0;
+    for (const arr of arrays) {
+      result.set(arr, offset);
+      offset += arr.length;
+    }
+    return result;
   }
 
   _log(...messages) {

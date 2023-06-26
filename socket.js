@@ -242,11 +242,11 @@ const {Socket} = (function () {
       const ackOrSeq = isAck ? ack : seq;
 
       const header = Uint8Array.of(
-          ack ? 1 : 0,
-          (ackOrSeq & 0xFF000000) >> 24,
-          (ackOrSeq & 0x00FF0000) >> 16,
-          (ackOrSeq & 0x0000FF00) >> 8,
-          (ackOrSeq & 0x000000FF) >> 0,
+        ack ? 1 : 0,
+        (ackOrSeq & 0xFF000000) >> 24,
+        (ackOrSeq & 0x00FF0000) >> 16,
+        (ackOrSeq & 0x0000FF00) >> 8,
+        (ackOrSeq & 0x000000FF) >> 0,
       );
 
       return isAck ? header : this._concatenate(Uint8Array, header, payload);
@@ -314,7 +314,7 @@ const {Socket} = (function () {
           this._sendBuffer.forwardWindow();
           this._sendBuffer.collectWindowBehind();
 
-          this._log(`window forwarded. now looks like: ${this._sendBuffer.toString()}`);
+          this._log(`sending window forwarded. now looks like: ${this._sendBuffer.toString()}`);
         } else {
           break;
         }
@@ -381,7 +381,7 @@ const {Socket} = (function () {
             this._log(`consumed ${seq}.`);
           }
 
-          this._log(`window forwarded. now looks like: ${this._recvBuffer.toString()}`);
+          this._log(`receiving window forwarded. now looks like: ${this._recvBuffer.toString()}`);
         } else {
           break;
         }
@@ -422,7 +422,7 @@ const {Socket} = (function () {
       });
     }
 
-    bind(quiet) {
+    async bind(quiet) {
       this.transceiver.uplink.onRead = (buffer) => {
         quiet.transmit({
           clampFrame: false,
@@ -430,7 +430,7 @@ const {Socket} = (function () {
         });
       }
 
-      quiet.receive((buffer) => {
+      await quiet.receive((buffer) => {
         this.transceiver.downlink.push(buffer);
       });
     }

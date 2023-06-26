@@ -440,6 +440,19 @@ class Socket {
     });
   }
 
+  bind(quiet) {
+    this.transceiver.uplink.onRead = (buffer) => {
+      quiet.transmit({
+        clampFrame: false,
+        payload: buffer
+      });
+    }
+
+    quiet.receive((buffer) => {
+      this.transceiver.downlink.push(buffer);
+    });
+  }
+
   listen(callback) {
     this.transceiver.startListening(callback);
   }

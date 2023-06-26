@@ -1,17 +1,3 @@
-function concatenate(resultConstructor, ...arrays) {
-  let totalLength = 0;
-  for (const arr of arrays) {
-    totalLength += arr.length;
-  }
-  const result = new resultConstructor(totalLength);
-  let offset = 0;
-  for (const arr of arrays) {
-    result.set(arr, offset);
-    offset += arr.length;
-  }
-  return result;
-}
-
 /**
  * 나가는 데이터 세그먼트입니다.
  * 페이로드와 상태를 함께 포함합니다.
@@ -161,13 +147,13 @@ class Stream {
  * full duplex로 양방향 전송 가능합니다.
  */
 class Transceiver {
-  constructor(name) {
-    this.name = name;
-
+  constructor({name, timeout, windowSize} = {}) {
     this.downlink = new Stream((data) => this._onReceiveFromDownlink(data));
     this.uplink = new Stream();
 
-    this._windowSize = 4;
+    this._name = name;
+    this._timeout = timeout || 5000;
+    this._windowSize = windowSize || 4;
 
     this._sendBuffer = new WindowBuffer(this._windowSize);
     this._outbounds = [];
@@ -175,10 +161,6 @@ class Transceiver {
 
     this._recvBuffer = new WindowBuffer(this._windowSize);
     this._payloadReceiveCallback = () => {};
-
-    this.downlink = new Stream();
-    this.downlink.onRead = (data) => this._onReceiveFromDownlink(data);
-    this.uplink = new Stream();
 
     this._finishTransmission = () => {};
   }
@@ -201,13 +183,13 @@ class Transceiver {
 
     const promise = new Promise((res) => this._finishTransmission = res);
 
-    this._fillBuffer();
+    this._fillSendBuffer();
     this._sendWindowInTimeout();
 
     return promise;
   }
 
-  _fillBuffer() {
+  _fillSendBuffer() {
     this._sendBuffer.forEachWindow((item, index) => {
       if (item == null && this._outbounds.length > 0) {
         this._sendBuffer.set(index, new OutboundDataSegment(index, this._outbounds.shift()));
@@ -225,7 +207,7 @@ class Transceiver {
       this._timeoutId = setTimeout(() => {
         this._log(`timeout resend window`);
         send();
-      },5000);
+      },this._timeout);
     };
 
     send();
@@ -338,7 +320,7 @@ class Transceiver {
       return;
     }
 
-    this._fillBuffer();
+    this._fillSendBuffer();
     this._sendWindowInTimeout();
   }
 
@@ -440,8 +422,8 @@ class Transceiver {
   }
 
   _log(...messages) {
-    if (this.name != null && this.name.trim().length > 0) {
-      console.log(this.name, ...messages);
+    if (this._name != null && this._name.trim().length > 0) {
+      console.log(this._name, ...messages);
     }
   }
 }
@@ -451,7 +433,11 @@ class Transceiver {
  */
 class Socket {
   constructor(name) {
-    this.transceiver = new Transceiver(name);
+    this.transceiver = new Transceiver({
+      name: name,
+      timeout: 3000,
+      windowSize: 4
+    });
   }
 
   listen(callback) {
